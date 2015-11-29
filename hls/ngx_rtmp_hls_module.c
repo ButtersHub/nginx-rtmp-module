@@ -85,6 +85,7 @@ typedef struct {
 typedef struct {
     ngx_str_t                           path;
     ngx_msec_t                          playlen;
+    ngx_msec_t                          cleanup_interval;
     ngx_uint_t                          frags_per_key;
 } ngx_rtmp_hls_cleanup_t;
 
@@ -97,6 +98,7 @@ typedef struct {
     ngx_msec_t                          sync;
     ngx_msec_t                          playlen;
     ngx_uint_t                          winfrags;
+    ngx_uint_t                          playwin;
     ngx_flag_t                          continuous;
     ngx_flag_t                          nested;
     ngx_str_t                           path;
@@ -107,6 +109,7 @@ typedef struct {
     ngx_msec_t                          max_audio_delay;
     size_t                              audio_buffer_size;
     ngx_flag_t                          cleanup;
+    ngx_msec_t                          cleanup_interval;
     ngx_array_t                        *variant;
     ngx_str_t                           base_url;
     ngx_int_t                           granularity;
@@ -259,6 +262,13 @@ static ngx_command_t ngx_rtmp_hls_commands[] = {
       offsetof(ngx_rtmp_hls_app_conf_t, cleanup),
       NULL },
 
+    { ngx_string("hls_cleanup_interval"),
+      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_msec_slot,
+      NGX_RTMP_APP_CONF_OFFSET,
+      offsetof(ngx_rtmp_hls_app_conf_t, cleanup_interval),
+      NULL },
+
     { ngx_string("hls_variant"),
       NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_1MORE,
       ngx_rtmp_hls_variant,
@@ -365,7 +375,7 @@ ngx_rtmp_hls_next_frag(ngx_rtmp_session_t *s)
     hacf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_hls_module);
     ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_hls_module);
 
-    if (ctx->nfrags == hacf->winfrags) {
+    if (ctx->nfrags == hacf->playwin) {
         ctx->frag++;
     } else {
         ctx->nfrags++;
@@ -2065,7 +2075,7 @@ ngx_rtmp_hls_stream_eof(ngx_rtmp_session_t *s, ngx_rtmp_stream_eof_t *v)
 
 
 static ngx_int_t
-ngx_rtmp_hls_cleanup_dir(ngx_str_t *ppath, ngx_msec_t playlen)
+ngx_rtmp_hls_cleanup_dir(ngx_str_t *ppath, ngx_msec_t playlen, ngx_msec_t cleanup_interval)
 {
     ngx_dir_t               dir;
     time_t                  mtime, max_age;
@@ -2075,9 +2085,9 @@ ngx_rtmp_hls_cleanup_dir(ngx_str_t *ppath, ngx_msec_t playlen)
     ngx_int_t               nentries, nerased;
     u_char                  path[NGX_MAX_PATH + 1];
 
-    ngx_log_debug2(NGX_LOG_DEBUG_RTMP, ngx_cycle->log, 0,
-                   "hls: cleanup path='%V' playlen=%M",
-                   ppath, playlen);
+    ngx_log_debug3(NGX_LOG_DEBUG_RTMP, ngx_cycle->log, 0,
+                   "hls: cleanup path='%V' playlen=%M cleanup interval=%M",
+                   ppath, playlen, cleanup_interval);
 
     if (ngx_open_dir(ppath, &dir) != NGX_OK) {
         ngx_log_debug1(NGX_LOG_DEBUG_RTMP, ngx_cycle->log, ngx_errno,
@@ -2135,7 +2145,7 @@ ngx_rtmp_hls_cleanup_dir(ngx_str_t *ppath, ngx_msec_t playlen)
 
         if (ngx_de_is_dir(&dir)) {
 
-            if (ngx_rtmp_hls_cleanup_dir(&spath, playlen) == 0) {
+            if (ngx_rtmp_hls_cleanup_dir(&spath, playlen, cleanup_interval) == 0) {
                 ngx_log_debug1(NGX_LOG_DEBUG_RTMP, ngx_cycle->log, 0,
                                "hls: cleanup dir '%V'", &name);
 
@@ -2166,7 +2176,7 @@ ngx_rtmp_hls_cleanup_dir(ngx_str_t *ppath, ngx_msec_t playlen)
                              name.data[name.len - 2] == 't' &&
                              name.data[name.len - 1] == 's')
         {
-            max_age = playlen / 500;
+            max_age = cleanup_interval / 1000;
 
         } else if (name.len >= 5 && name.data[name.len - 5] == '.' &&
                                     name.data[name.len - 4] == 'm' &&
@@ -2181,7 +2191,7 @@ ngx_rtmp_hls_cleanup_dir(ngx_str_t *ppath, ngx_msec_t playlen)
                                     name.data[name.len - 2] == 'e' &&
                                     name.data[name.len - 1] == 'y')
         {
-            max_age = playlen / 500;
+            max_age = cleanup_interval / 1000;
 
         } else {
             ngx_log_debug1(NGX_LOG_DEBUG_RTMP, ngx_cycle->log, 0,
@@ -2215,7 +2225,7 @@ ngx_rtmp_hls_cleanup(void *data)
 {
     ngx_rtmp_hls_cleanup_t *cleanup = data;
 
-    ngx_rtmp_hls_cleanup_dir(&cleanup->path, cleanup->playlen);
+    ngx_rtmp_hls_cleanup_dir(&cleanup->path, cleanup->playlen, cleanup->cleanup_interval);
 
     return cleanup->playlen / 500;
 }
@@ -2297,6 +2307,7 @@ ngx_rtmp_hls_create_app_conf(ngx_conf_t *cf)
     conf->max_audio_delay = NGX_CONF_UNSET_MSEC;
     conf->audio_buffer_size = NGX_CONF_UNSET_SIZE;
     conf->cleanup = NGX_CONF_UNSET;
+    conf->cleanup_interval = NGX_CONF_UNSET;
     conf->granularity = NGX_CONF_UNSET;
     conf->keys = NGX_CONF_UNSET;
     conf->frags_per_key = NGX_CONF_UNSET_UINT;
@@ -2332,6 +2343,7 @@ ngx_rtmp_hls_merge_app_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_size_value(conf->audio_buffer_size, prev->audio_buffer_size,
                               NGX_RTMP_HLS_BUFSIZE);
     ngx_conf_merge_value(conf->cleanup, prev->cleanup, 1);
+    ngx_conf_merge_msec_value(conf->cleanup_interval, prev->cleanup_interval, 60000)
     ngx_conf_merge_str_value(conf->base_url, prev->base_url, "");
     ngx_conf_merge_value(conf->granularity, prev->granularity, 0);
     ngx_conf_merge_value(conf->keys, prev->keys, 0);
@@ -2340,7 +2352,8 @@ ngx_rtmp_hls_merge_app_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_uint_value(conf->frags_per_key, prev->frags_per_key, 0);
 
     if (conf->fraglen) {
-        conf->winfrags = conf->playlen / conf->fraglen;
+        conf->winfrags = conf->cleanup_interval / conf->fraglen;
+        conf->playwin = conf->playlen / conf->fraglen;
     }
 
     /* schedule cleanup */
@@ -2359,6 +2372,7 @@ ngx_rtmp_hls_merge_app_conf(ngx_conf_t *cf, void *parent, void *child)
 
         cleanup->path = conf->path;
         cleanup->playlen = conf->playlen;
+        cleanup->cleanup_interval = conf->cleanup_interval;
 
         conf->slot = ngx_pcalloc(cf->pool, sizeof(*conf->slot));
         if (conf->slot == NULL) {
@@ -2393,6 +2407,7 @@ ngx_rtmp_hls_merge_app_conf(ngx_conf_t *cf, void *parent, void *child)
 
         cleanup->path = conf->key_path;
         cleanup->playlen = conf->playlen;
+        cleanup->cleanup_interval = conf->cleanup_interval;
 
         conf->slot = ngx_pcalloc(cf->pool, sizeof(*conf->slot));
         if (conf->slot == NULL) {
