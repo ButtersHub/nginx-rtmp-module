@@ -12,6 +12,7 @@
 #include "ngx_rtmp_netcall_module.h"
 #include "ngx_rtmp_record_module.h"
 #include "ngx_rtmp_relay_module.h"
+#include "hls/ngx_rtmp_hls_module.h"
 
 
 static ngx_rtmp_connect_pt                      next_connect;
@@ -20,6 +21,7 @@ static ngx_rtmp_publish_pt                      next_publish;
 static ngx_rtmp_play_pt                         next_play;
 static ngx_rtmp_close_stream_pt                 next_close_stream;
 static ngx_rtmp_record_done_pt                  next_record_done;
+static ngx_rtmp_hls_frag_done_pt                next_hls_frag_done;
 
 
 static char *ngx_rtmp_notify_on_srv_event(ngx_conf_t *cf, ngx_command_t *cmd,
@@ -55,6 +57,7 @@ enum {
     NGX_RTMP_NOTIFY_DONE,
     NGX_RTMP_NOTIFY_RECORD_DONE,
     NGX_RTMP_NOTIFY_UPDATE,
+    NGX_RTMP_NOTIFIY_HLS_FRAG_DONE,
     NGX_RTMP_NOTIFY_APP_MAX
 };
 
@@ -157,6 +160,13 @@ static ngx_command_t  ngx_rtmp_notify_commands[] = {
       NULL },
 
     { ngx_string("on_update"),
+      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
+      ngx_rtmp_notify_on_app_event,
+      NGX_RTMP_APP_CONF_OFFSET,
+      0,
+      NULL },
+
+    { ngx_string("on_hls_fargment_done"),
       NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
       ngx_rtmp_notify_on_app_event,
       NGX_RTMP_APP_CONF_OFFSET,
@@ -796,6 +806,103 @@ ngx_rtmp_notify_record_done_create(ngx_rtmp_session_t *s, void *arg,
                                           pl);
 }
 
+static ngx_chain_t *
+ngx_rtmp_notify_hls_frag_done_create(ngx_rtmp_session_t *s, void *arg,
+                                   ngx_pool_t *pool)
+{
+    ngx_rtmp_hls_frag_done_t      *v = arg;
+    ngx_rtmp_notify_ctx_t         *ctx;
+    ngx_chain_t                   *pl;
+    ngx_buf_t                     *b;
+    size_t                        path_len, stream_len, var_len, var_args_len;
+
+    ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_notify_module);
+
+    pl = ngx_alloc_chain_link(pool);
+    if (pl == NULL) {
+        return NULL;
+    }
+
+    path_len  = ngx_strlen(v->frag_path);
+    stream_len  = ngx_strlen(v->stream);
+    var_len  = ngx_strlen(v->variant);
+    var_args_len = ngx_strlen(v->variant_args);
+
+    b = ngx_create_temp_buf(pool,
+                            sizeof("&call=hls_fragment_done") +
+                            sizeof("&path=") + path_len * 3 +
+                            sizeof("&stream=") + stream_len * 3 +
+                            (var_len > 0 ?
+                              sizeof("&variant=") + var_len * 3 : 0) +
+                            (var_args_len > 0 ?
+                              sizeof("&variant_args=") + var_args_len * 3 : 0) +
+                            sizeof("&id=") + NGX_INT64_LEN +
+                            sizeof("&key_id=") + NGX_INT64_LEN +
+                            sizeof("&duration=") + 10 +
+                            sizeof("&active=") + 1 +
+                            sizeof("&discontinuity=") + 1 +
+                            sizeof("&ts=") + NGX_INT64_LEN +
+                            sizeof("&systs=") + NGX_INT64_LEN +
+                            1);
+    if (b == NULL) {
+      return NULL;
+    }
+
+    pl->buf = b;
+    pl->next = NULL;
+
+    b->last = ngx_cpymem(b->last, (u_char*) "&call=hls_fragment_done",
+                       sizeof("&call=hls_fragment_done") - 1);
+
+    b->last = ngx_cpymem(b->last, (u_char*) "&path=", sizeof("&path=") - 1);
+    b->last = (u_char*) ngx_escape_uri(b->last, v->frag_path, path_len,
+                                       NGX_ESCAPE_ARGS);
+
+    b->last = ngx_cpymem(b->last, (u_char*) "&stream=", sizeof("&stream=") - 1);
+    b->last = (u_char*) ngx_escape_uri(b->last, v->stream, stream_len,
+                                      NGX_ESCAPE_ARGS);
+
+    if(var_len > 0) {
+      b->last = ngx_cpymem(b->last, (u_char*) "&variant=",
+                          sizeof("&variant=") - 1);
+      b->last = (u_char*) ngx_escape_uri(b->last, v->variant, var_len,
+                                        NGX_ESCAPE_ARGS);
+    }
+
+    if (var_args_len > 0) {
+      b->last = ngx_cpymem(b->last, (u_char*) "&variant_args=",
+                          sizeof("&variant_args=") - 1);
+      b->last = (u_char*) ngx_escape_uri(b->last, v->variant_args, var_args_len,
+                                        NGX_ESCAPE_ARGS);
+    }
+
+    b->last = ngx_cpymem(b->last, (u_char*) "&id=", sizeof("&id=") - 1);
+    b->last = ngx_sprintf(b->last, "%uL", v->id);
+
+    b->last = ngx_cpymem(b->last, (u_char*) "&key_id=", sizeof("&key_id=") - 1);
+    b->last = ngx_sprintf(b->last, "%uL", v->key_id);
+
+    b->last = ngx_cpymem(b->last, (u_char*) "&duration=",
+                        sizeof("&duration=") - 1);
+    b->last = ngx_sprintf(b->last, "%.3f", v->duration);
+
+    b->last = ngx_cpymem(b->last, (u_char*) "&active=", sizeof("&active=") - 1);
+    b->last = ngx_sprintf(b->last, "%1ud", v->active);
+
+    b->last = ngx_cpymem(b->last, (u_char*) "&discontinuity=",
+                        sizeof("&discontinuity=") - 1);
+    b->last = ngx_sprintf(b->last, "%1ud", v->discont);
+
+    b->last = ngx_cpymem(b->last, (u_char*) "&ts=", sizeof("&ts=") - 1);
+    b->last = ngx_sprintf(b->last, "%uL", v->frag_ts);
+
+    b->last = ngx_cpymem(b->last, (u_char*) "&systs=", sizeof("&systs=") - 1);
+    b->last = ngx_sprintf(b->last, "%uL", v->system_ts);
+
+    return ngx_rtmp_notify_create_request(s, pool,
+                                          NGX_RTMP_NOTIFIY_HLS_FRAG_DONE, pl);
+
+}
 
 static ngx_int_t
 ngx_rtmp_notify_parse_http_retcode(ngx_rtmp_session_t *s,
@@ -1513,6 +1620,37 @@ next:
     return next_record_done(s, v);
 }
 
+static ngx_int_t
+ngx_rtmp_notify_hls_frag_done(ngx_rtmp_session_t *s, ngx_rtmp_hls_frag_done_t *v)
+{
+  ngx_rtmp_netcall_init_t         ci;
+  ngx_rtmp_notify_app_conf_t     *nacf;
+
+  if (s->auto_pushed) {
+      goto next;
+  }
+
+  nacf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_notify_module);
+  if (nacf == NULL || nacf->url[NGX_RTMP_NOTIFIY_HLS_FRAG_DONE] == NULL) {
+      goto next;
+  }
+
+  ngx_log_debug2(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+                "notify: hls_frag_done fragment=%s  url=%s",
+                &v->frag_path,
+                &nacf->url[NGX_RTMP_NOTIFIY_HLS_FRAG_DONE]->url);
+
+  ngx_memzero(&ci, sizeof(ci));
+
+  ci.url    = nacf->url[NGX_RTMP_NOTIFIY_HLS_FRAG_DONE];
+  ci.create = ngx_rtmp_notify_hls_frag_done_create;
+  ci.arg    = v;
+
+  ngx_rtmp_netcall_create(s, &ci);
+
+next:
+  return next_hls_frag_done(s, v);
+}
 
 static ngx_int_t
 ngx_rtmp_notify_done(ngx_rtmp_session_t *s, char *cbname, ngx_uint_t url_idx)
@@ -1663,6 +1801,10 @@ ngx_rtmp_notify_on_app_event(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         case sizeof("on_publish_done") - 1:
             n = NGX_RTMP_NOTIFY_PUBLISH_DONE;
             break;
+
+        case sizeof("on_hls_fargment_done") - 1:
+            n = NGX_RTMP_NOTIFIY_HLS_FRAG_DONE;
+            break;
     }
 
     nacf->url[n] = u;
@@ -1723,6 +1865,9 @@ ngx_rtmp_notify_postconfiguration(ngx_conf_t *cf)
 
     next_record_done = ngx_rtmp_record_done;
     ngx_rtmp_record_done = ngx_rtmp_notify_record_done;
+
+    next_hls_frag_done = ngx_rtmp_hls_frag_done;
+    ngx_rtmp_hls_frag_done = ngx_rtmp_notify_hls_frag_done;
 
     return NGX_OK;
 }

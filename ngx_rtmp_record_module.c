@@ -24,6 +24,7 @@ static ngx_rtmp_stream_eof_pt       next_stream_eof;
 
 static char *ngx_rtmp_record_recorder(ngx_conf_t *cf, ngx_command_t *cmd,
        void *conf);
+static ngx_int_t ngx_rtmp_record_preconfiguration(ngx_conf_t *cf);
 static ngx_int_t ngx_rtmp_record_postconfiguration(ngx_conf_t *cf);
 static void * ngx_rtmp_record_create_app_conf(ngx_conf_t *cf);
 static char * ngx_rtmp_record_merge_app_conf(ngx_conf_t *cf,
@@ -151,7 +152,7 @@ static ngx_command_t  ngx_rtmp_record_commands[] = {
 
 
 static ngx_rtmp_module_t  ngx_rtmp_record_module_ctx = {
-    NULL,                                   /* preconfiguration */
+    ngx_rtmp_record_preconfiguration,                                   /* preconfiguration */
     ngx_rtmp_record_postconfiguration,      /* postconfiguration */
     NULL,                                   /* create main configuration */
     NULL,                                   /* init main configuration */
@@ -1268,6 +1269,13 @@ ngx_rtmp_record_recorder(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     return rv;
 }
 
+static ngx_int_t
+ngx_rtmp_record_preconfiguration(ngx_conf_t *cf)
+{
+  ngx_rtmp_record_done = ngx_rtmp_record_done_init;
+
+  return NGX_OK;
+}
 
 static ngx_int_t
 ngx_rtmp_record_postconfiguration(ngx_conf_t *cf)
@@ -1275,7 +1283,6 @@ ngx_rtmp_record_postconfiguration(ngx_conf_t *cf)
     ngx_rtmp_core_main_conf_t          *cmcf;
     ngx_rtmp_handler_pt                *h;
 
-    ngx_rtmp_record_done = ngx_rtmp_record_done_init;
 
     cmcf = ngx_rtmp_conf_get_module_main_conf(cf, ngx_rtmp_core_module);
 

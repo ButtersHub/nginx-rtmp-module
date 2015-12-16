@@ -10,7 +10,9 @@
 #include <ngx_rtmp_cmd_module.h>
 #include <ngx_rtmp_codec_module.h>
 #include "ngx_rtmp_mpegts.h"
+#include "ngx_rtmp_hls_module.h"
 
+ngx_rtmp_hls_frag_done_pt          ngx_rtmp_hls_frag_done;
 
 static ngx_rtmp_publish_pt              next_publish;
 static ngx_rtmp_close_stream_pt         next_close_stream;
@@ -20,6 +22,7 @@ static ngx_rtmp_stream_eof_pt           next_stream_eof;
 
 static char * ngx_rtmp_hls_variant(ngx_conf_t *cf, ngx_command_t *cmd,
        void *conf);
+static ngx_int_t ngx_rtmp_hls_preconfiguration(ngx_conf_t *cf);
 static ngx_int_t ngx_rtmp_hls_postconfiguration(ngx_conf_t *cf);
 static void * ngx_rtmp_hls_create_app_conf(ngx_conf_t *cf);
 static char * ngx_rtmp_hls_merge_app_conf(ngx_conf_t *cf,
@@ -39,6 +42,8 @@ typedef struct {
     double                              duration;
     unsigned                            active:1;
     unsigned                            discont:1; /* before */
+    uint64_t                            ts;
+    uint64_t                            system_ts;
 } ngx_rtmp_hls_frag_t;
 
 
@@ -323,7 +328,7 @@ static ngx_command_t ngx_rtmp_hls_commands[] = {
 
 
 static ngx_rtmp_module_t  ngx_rtmp_hls_module_ctx = {
-    NULL,                               /* preconfiguration */
+    ngx_rtmp_hls_preconfiguration,      /* preconfiguration */
     ngx_rtmp_hls_postconfiguration,     /* postconfiguration */
 
     NULL,                               /* create main configuration */
@@ -381,7 +386,6 @@ ngx_rtmp_hls_next_frag(ngx_rtmp_session_t *s)
         ctx->nfrags++;
     }
 }
-
 
 static ngx_int_t
 ngx_rtmp_hls_rename_file(u_char *src, u_char *dst)
@@ -828,7 +832,13 @@ ngx_rtmp_hls_get_fragment_id(ngx_rtmp_session_t *s, uint64_t ts)
 static ngx_int_t
 ngx_rtmp_hls_close_fragment(ngx_rtmp_session_t *s)
 {
-    ngx_rtmp_hls_ctx_t         *ctx;
+    ngx_rtmp_hls_ctx_t          *ctx;
+    ngx_rtmp_hls_frag_done_t    v;
+    ngx_rtmp_hls_frag_t         *f;
+    ngx_str_t                   *arg;
+    u_char                      *p;
+    uint32_t                    k;
+
 
     ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_hls_module);
     if (ctx == NULL || !ctx->opened) {
@@ -842,9 +852,38 @@ ngx_rtmp_hls_close_fragment(ngx_rtmp_session_t *s)
 
     ctx->opened = 0;
 
+    ngx_memzero(&v, sizeof(v));
+    ngx_memcpy(v.frag_path, ctx->stream.data, ngx_strlen(ctx->stream.data) + 1);
+    if (ctx->name.len > 0 && ngx_strlen(ctx->name.data) > 0) {
+      ngx_memcpy(v.stream, ctx->name.data, ngx_strlen(ctx->name.data) + 1);
+    }
+    if (ctx->var && ctx->var->suffix.len > 0 && ngx_strlen(ctx->var->suffix.data) > 0) {
+      ngx_memcpy(v.variant, ctx->var->suffix.data,  ngx_strlen(ctx->var->suffix.data) + 1);
+    }
+
+    if (ctx->var && ctx->var->args.nelts) {
+      arg = ctx->var->args.elts;
+      p = (u_char*)&v.variant_args;
+      for (k = 0; k < ctx->var->args.nelts; k++, arg++) {
+        p = ngx_slprintf(p, p + sizeof(v), ",%V", arg);
+      }
+    }
+
+    f = ngx_rtmp_hls_get_frag(s, ctx->nfrags);
+    v.id = f->id;
+    v.key_id = f->key_id;
+    v.duration = f->duration;
+    v.active = f->active;
+    v.discont = f->discont;
+    v.frag_ts = f->ts;
+    v.system_ts = f->system_ts;
+
+    ngx_rtmp_hls_frag_done(s, &v);
+
     ngx_rtmp_hls_next_frag(s);
 
     ngx_rtmp_hls_write_playlist(s);
+
 
     return NGX_OK;
 }
@@ -970,6 +1009,8 @@ ngx_rtmp_hls_open_fragment(ngx_rtmp_session_t *s, uint64_t ts,
     f->discont = discont;
     f->id = id;
     f->key_id = ctx->key_id;
+    f->ts = ts;
+    f->system_ts = (uint64_t) ngx_cached_time->sec * 1000 + ngx_cached_time->msec;
 
     ctx->frag_ts = ts;
 
@@ -2343,7 +2384,8 @@ ngx_rtmp_hls_merge_app_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_size_value(conf->audio_buffer_size, prev->audio_buffer_size,
                               NGX_RTMP_HLS_BUFSIZE);
     ngx_conf_merge_value(conf->cleanup, prev->cleanup, 1);
-    ngx_conf_merge_msec_value(conf->cleanup_interval, prev->cleanup_interval, 60000)
+    ngx_conf_merge_msec_value(conf->cleanup_interval, prev->cleanup_interval,
+                              3600000)
     ngx_conf_merge_str_value(conf->base_url, prev->base_url, "");
     ngx_conf_merge_value(conf->granularity, prev->granularity, 0);
     ngx_conf_merge_value(conf->keys, prev->keys, 0);
@@ -2434,6 +2476,19 @@ ngx_rtmp_hls_merge_app_conf(ngx_conf_t *cf, void *parent, void *child)
     return NGX_CONF_OK;
 }
 
+static ngx_int_t
+ngx_rtmp_hls_frag_done_init(ngx_rtmp_session_t *s, ngx_rtmp_hls_frag_done_t *v)
+{
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_rtmp_hls_preconfiguration(ngx_conf_t *cf)
+{
+  ngx_rtmp_hls_frag_done = ngx_rtmp_hls_frag_done_init;
+
+  return NGX_OK;
+}
 
 static ngx_int_t
 ngx_rtmp_hls_postconfiguration(ngx_conf_t *cf)
