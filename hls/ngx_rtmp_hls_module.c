@@ -103,7 +103,6 @@ typedef struct {
     ngx_msec_t                          sync;
     ngx_msec_t                          playlen;
     ngx_uint_t                          winfrags;
-    ngx_uint_t                          playwin;
     ngx_flag_t                          continuous;
     ngx_flag_t                          nested;
     ngx_str_t                           path;
@@ -380,7 +379,7 @@ ngx_rtmp_hls_next_frag(ngx_rtmp_session_t *s)
     hacf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_hls_module);
     ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_hls_module);
 
-    if (ctx->nfrags == hacf->playwin) {
+    if (ctx->nfrags == hacf->winfrags) {
         ctx->frag++;
     } else {
         ctx->nfrags++;
@@ -2394,8 +2393,7 @@ ngx_rtmp_hls_merge_app_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_uint_value(conf->frags_per_key, prev->frags_per_key, 0);
 
     if (conf->fraglen) {
-        conf->winfrags = conf->cleanup_interval / conf->fraglen;
-        conf->playwin = conf->playlen / conf->fraglen;
+        conf->winfrags = conf->playlen / conf->fraglen;
     }
 
     /* schedule cleanup */
